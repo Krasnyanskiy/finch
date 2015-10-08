@@ -1,6 +1,8 @@
 package io
 
+import com.twitter.finagle.httpx.Response
 import com.twitter.util.Future
+import io.finch.response.EncodeResponse
 
 /**
  * This is a root package of the Finch library, which provides an immutable layer of functions and types atop of Finagle
@@ -37,5 +39,25 @@ package object finch
      * Converts this throwable object into a `Future` exception.
      */
     def toFutureException[A]: Future[A] = Future.exception[A](t)
+  }
+
+  // Implicitly converts an `Endpoint.Output` to `Response`.
+  implicit def outputToResponse[A](o: Endpoint.Output[A])(implicit e: EncodeResponse[A]): Response = {
+    val rep = Response()
+    // properties from `EncodeResponse`
+    rep.content = e(o.value)
+    rep.contentType = e.contentType
+    e.charset.foreach { cs => rep.charset = cs }
+
+    // properties from Output
+    rep.status = o.status
+    o.headers.foreach { case (k, v) => rep.headerMap.add(k, v) }
+    o.cookies.foreach {
+      rep.addCookie
+    }
+    o.contentType.foreach { ct => rep.contentType = ct }
+    o.charset.foreach { cs => rep.charset = cs }
+
+    rep
   }
 }

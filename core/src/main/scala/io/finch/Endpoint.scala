@@ -9,7 +9,8 @@ import shapeless.ops.adjoin.Adjoin
 import shapeless.ops.function.FnToProduct
 
 /**
- * An endpoint that extracts some value of the type `A` from the given input.
+ * An endpoint that is given an [[Endpoint.Input()]], extracts some value of the type `A`, wrapped with
+ * [[Endpoint.Output]].
  */
 trait Endpoint[A] { self =>
   import Endpoint._
@@ -22,6 +23,8 @@ trait Endpoint[A] { self =>
   /**
    * Extracts some value of type `A` from the given `input`.
    */
+  // There is a reason why it can't be renamed to `run` as per https://github.com/finagle/finch/issues/371.
+  // More details are here: http://stackoverflow.com/questions/32064375/magnet-pattern-and-overloaded-methods
   def apply(input: Input): Option[(Input, () => Future[Output[A]])]
 
   /**
@@ -47,6 +50,7 @@ trait Endpoint[A] { self =>
       }
 
     override def toString = self.toString
+    override def errorHandler = self.errorHandler
   }
 
   /**
@@ -61,6 +65,9 @@ trait Endpoint[A] { self =>
   def efmap[B](fn: A => Output[Future[B]]): Endpoint[B] =
     femap(fn.andThen(ofb => ofb.value.map(b => ofb.copy(value = b))))
 
+  /**
+   * Maps this endpoint to the given function `A => Future[Output[B]]`.
+   */
   def femap[B](fn: A => Future[Output[B]]): Endpoint[B] = new Endpoint[B] {
     def apply(input: Input): Option[(Input, () => Future[Output[B]])] =
       self(input).map {
@@ -80,6 +87,7 @@ trait Endpoint[A] { self =>
       }
 
     override def toString = self.toString
+    override def errorHandler = self.errorHandler
   }
 
   /**
@@ -100,6 +108,7 @@ trait Endpoint[A] { self =>
       }
 
     override def toString = self.toString
+    override def errorHandler = self.errorHandler
   }
 
   /**
@@ -114,6 +123,7 @@ trait Endpoint[A] { self =>
       def apply(input: Input): Option[(Input, () => Future[Output[adjoin.Out]])] = inner(input)
 
       override def toString = s"${self.toString}/${that.toString}"
+      override def errorHandler = self.errorHandler
     }
 
   /**
@@ -133,6 +143,7 @@ trait Endpoint[A] { self =>
         }
 
       override def toString = s"${self.toString}?${that.toString}"
+      override def errorHandler = self.errorHandler
     }
 
   /**
@@ -148,13 +159,14 @@ trait Endpoint[A] { self =>
       }
 
     override def toString = s"(${self.toString}|${that.toString})"
+    override def errorHandler = self.errorHandler
   }
 
   // A workaround for https://issues.scala-lang.org/browse/SI-1336
   def withFilter(p: A => Boolean): Endpoint[A] = self
 
   /**
-   * Compose this endpoint with another in such a way that coproducts are flattened.
+   * Composes this endpoint with another in such a way that coproducts are flattened.
    */
   def :+:[B](that: Endpoint[B])(implicit adjoin: Adjoin[B :+: A :+: CNil]): Endpoint[adjoin.Out] =
     that.map(b => adjoin(Inl[B, A :+: CNil](b))) |
@@ -182,9 +194,10 @@ trait Endpoint[A] { self =>
   def toService(implicit ts: ToService[A]): Service[Request, Response] = ts(this)
 
   /**
-   * Handle exception occurred at endpoint with async PartialFunction
+   * Rescues from any exception occurred in this endpoint.
    */
-  def rescue[B >: A](pf: PartialFunction[Throwable, Future[Output[B]]]): Endpoint[B] =  new Endpoint[B] {
+  def rescue[B >: A](pf: PartialFunction[Throwable, Future[Output[B]]]): Endpoint[B] = new Endpoint[B] {
+    // TODO: Should work with `Output[B]` and Output[Future[B]]`.
     def apply(input: Input): Option[(Input, () => Future[Output[B]])] =
       self(input).map {
         case (remainder, output) =>
@@ -192,12 +205,22 @@ trait Endpoint[A] { self =>
       }
 
     override def toString = self.toString
+    override def errorHandler = self.errorHandler
   }
 
+  // An error handler.
+  private[finch] def errorHandler: PartialFunction[Throwable, Response] =
+    PartialFunction.empty[Throwable, Response]
+
   /**
-   * Handle exception occurred at endpoint with PartialFunction
+   * Handles any exception occurred this this endpoint.
    */
-  def handle[B >: A](pf: PartialFunction[Throwable, Output[B]]): Endpoint[B] = rescue(pf.andThen(Future.value))
+  def handle(pf: PartialFunction[Throwable, Response]): Endpoint[A] = new Endpoint[A] {
+    def apply(input: Input): Option[(Input, () => Future[Output[A]])] = self(input)
+
+    override def toString = self.toString
+    override def errorHandler = self.errorHandler.orElse(pf)
+  }
 
   private[this] def withOutput[B](fn: Output[A] => Output[B]): Endpoint[B] = new Endpoint[B] {
     def apply(input: Input): Option[(Input, () => Future[Output[B]])] =
@@ -206,6 +229,7 @@ trait Endpoint[A] { self =>
       }
 
     override def toString = self.toString
+    override def errorHandler = self.errorHandler
   }
 }
 
@@ -217,7 +241,7 @@ object Endpoint {
   /**
    * An input for [[Endpoint]].
    */
-  case class Input(request: Request, path: Seq[String]) {
+  final case class Input(request: Request, path: Seq[String]) {
     def headOption: Option[String] = path.headOption
     def drop(n: Int): Input = copy(path = path.drop(n))
     def isEmpty: Boolean = path.isEmpty
@@ -231,7 +255,7 @@ object Endpoint {
   /**
    * An output of [[Endpoint]].
    */
-  case class Output[+A](
+  final case class Output[+A](
     value: A,
     status: Status = Status.Ok,
     headers: Map[String, String] = Map.empty[String, String],
@@ -239,6 +263,7 @@ object Endpoint {
     contentType: Option[String] = None,
     charset: Option[String] = None
   ) {
+    def apply[B](value: B): Output[B] = copy(value = value)
     def withHeader(header: (String, String)): Output[A] = copy(headers = headers + header)
     def withCookie(cookie: Cookie): Output[A] = copy(cookies = cookies :+ cookie)
     def withContentType(contentType: Option[String]): Output[A] = copy(contentType = contentType)

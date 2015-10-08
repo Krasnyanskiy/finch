@@ -3,7 +3,7 @@ package io.finch
 import java.util.UUID
 
 import com.twitter.finagle.Service
-import com.twitter.finagle.httpx.{Request, Response}
+import com.twitter.finagle.httpx.{Status, Request, Response}
 import com.twitter.util.{Await, Base64StringEncoder, Future, Return}
 import io.finch.request.{DecodeRequest, RequestReader, param}
 import io.finch.response.EncodeResponse
@@ -451,15 +451,31 @@ class EndpointSpec extends FlatSpec with Matchers with Checkers {
     runAndAwaitValue(r, Input(Request())) shouldBe None
   }
 
-  it should "handle exceptions occurred at the endpoint" in {
-    val stopWord = "Stop, u're destroying our universe!"
-
+  it should "rescue exceptions occurred at the endpoint" in {
     val input = Input(Request())
 
-    val r1 = get(/) { 1/0 } handle {
-      case e: ArithmeticException => InternalServerError(stopWord)
+    val r1: Endpoint[Int]= get(/) { Ok(1 / 0) } rescue {
+      case e: ArithmeticException => Future.value(Ok(100))
     }
 
-    runAndAwaitValue(r1, input).map(_._2) shouldBe Some(stopWord)
+    runAndAwaitValue(r1, input) shouldBe Some((input, 100))
+  }
+
+  it should "handle exceptions occurred at the endpoint" in {
+    val e: Endpoint[String] = get("foo" / string) { s: String =>
+      if (s.length > 2) Ok(s)
+      else if (s.length == 2) throw new IllegalArgumentException("")
+      else throw new NullPointerException("")
+    } handle {
+      case _: IllegalArgumentException => BadRequest("bar")
+      case _: NullPointerException => NoContent
+    }
+
+    val s = e.toService
+
+    Await.result(s(Request("/foo/bar"))).status shouldBe Status.Ok
+    Await.result(s(Request("/foo/ba"))).status shouldBe Status.BadRequest
+    Await.result(s(Request("/foo/b"))).status shouldBe Status.NoContent
+    Await.result(s(Request("/bar"))).status shouldBe Status.NotFound
   }
 }
